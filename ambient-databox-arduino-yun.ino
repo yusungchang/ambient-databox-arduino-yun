@@ -19,7 +19,7 @@
 #include <LiquidCrystal.h>
 #include <Process.h>
 #include <FileIO.h>
-#include <Wire.h> //I2C needed for sensors
+#include <Wire.h> //I2C
 #include "MPL3115A2.h" //Pressure sensor
 #include "HTU21D.h" //Humidity sensor
 
@@ -133,8 +133,8 @@ static byte wolfram_icon[8] = {
 //
 // Bridge related declarations
 //
-Process date; // Process for date command
-Process curl; // Process for curl command
+Process processDate; // Process for date command
+Process processCurl; // Process for curl command
 
 //
 // Sensor related declarations
@@ -143,11 +143,11 @@ MPL3115A2 sensorPressure;
 HTU21D sensorHumidity;
 
 #ifdef WEATHER_SHIELD
-#define STAT1 7 // Status LED pins for Weather Shield
-#define STAT2 8 // Status LED pins for Weather Shield
-#define OP_VOL A3 // Reference operational voltage of Weather Shield 
+#define WS_STAT1 7 // Status LED pins for Weather Shield
+#define WS_STAT2 8 // Status LED pins for Weather Shield
+#define WS_OP_VOL A3 // Reference operational voltage of Weather Shield 
 #endif
-#define LIGHT A1 // analog I/O pins for light sensor
+#define SENSOR_LIGHT A1 // analog I/O pins for light sensor
 
 //
 // Wolfram Data Drop related declarations
@@ -157,13 +157,13 @@ HTU21D sensorHumidity;
 #define wolfram_datadrop_api_url  "http://datadrop.wolframcloud.com/api" // Data Drop API URL
 #define wolfram_datadrop_api_ver "v1.0" // Data Drop API version
 #define wolfram_datadrop_api_add "Add" // Data Drop Add command
-#define wolfram_datadrop_sampling 60000 // Sample rate (default: every 60 seconds at most)
-#define wolfram_datadrop_timeout 30000 // Upload timeout (default: 30 seconds)
+#define wolfram_datadrop_sampling 300000 // Sample rate (default: every 300 seconds at most)
+#define wolfram_datadrop_timeout 60000 // Upload timeout (default: 60 seconds)
 
 //
 // UI related declarations
 //
-#define SCROLL_DELAY 1000 // How long each screen will stay in milliseconds
+#define SCROLL_DELAY    1000 // How long each screen will stay in milliseconds
 #define SCREEN_LINE_MAX 5
 
 int screen = 0;
@@ -172,6 +172,14 @@ int screen = 0;
 // Data related declarations
 //
 
+String time_string;
+float temp_f = 0;
+float temp_c = 0;
+float humidity = 0;
+float pressure = 0;
+float light = 0;
+
+// Min/max for sensor data
 #define TEMP_C_MIN   -99
 #define TEMP_C_MAX    99
 #define HUMIDITY_MIN  0
@@ -181,31 +189,30 @@ int screen = 0;
 #define LIGHT_MIN     0
 #define LIGHT_MAX     100
 
-String time_string;
-float temp_f = 0;
-float temp_c = 0;
-float humidity = 0;
-float pressure = 0;
-float light = 0;
-
+// Flags for invalid sensor data
 byte valid_flags = B0000000;
 
+// Validate sensor data
 #define VALID_TEMP        valid_flags |= B00000001
 #define VALID_HUMIDITY    valid_flags |= B00000010
 #define VALID_PRESSURE    valid_flags |= B00000100
 #define VALID_LIGHT       valid_flags |= B00001000
 
+// Invalidate sensor data
 #define INVALID_TEMP      valid_flags &= B11111110
 #define INVALID_HUMIDITY  valid_flags &= B11111101
 #define INVALID_PRESSURE  valid_flags &= B11111011
 #define INVALID_LIGHT     valid_flags &= B11110111
 
-#define VALIDQ_TEMP       (valid_flags & B00000001)
-#define VALIDQ_HUMIDITY   (valid_flags & B00000010)
-#define VALIDQ_PRESSURE   (valid_flags & B00000100)
-#define VALIDQ_LIGHT      (valid_flags & B00001000)
+// Tell whether sensor data is valid or not
+#define IS_VALID_TEMP       (valid_flags & B00000001)
+#define IS_VALID_HUMIDITY   (valid_flags & B00000010)
+#define IS_VALID_PRESSURE   (valid_flags & B00000100)
+#define IS_VALID_LIGHT      (valid_flags & B00001000)
 
+// Last time sensor data is collected
 unsigned long last_updated = 0;
+
 
 //
 // Sensor related functions
@@ -213,12 +220,13 @@ unsigned long last_updated = 0;
 float get_light_level()
 {
 #ifdef WEATHER_SHIELD
-  float operatingVoltage = analogRead(OP_VOL);
+  float operatingVoltage = analogRead(WS_OP_VOL);
 #else
   float operatingVolatage = 1023;
 #endif
-  float lightSensor = analogRead(LIGHT);
+  float lightSensor = analogRead(SENSOR_LIGHT);
 
+  // Normalize sensor input with operational voltage
   return (lightSensor / operatingVoltage * 100);
 }
 
@@ -258,17 +266,17 @@ void get_weather()
 //
 #define WOLFRAM_DATADROP_PARAM_MAX    256
 #define WOLFRAM_DATABIN_ID_MAX        16
-#define WOLFRAM_DATADROP_LOG_MAX      4300000 // Max size for log file (approx. 7 days). Afterward, it starts again.
+#define WOLFRAM_DATADROP_LOG_MAX      25000000 // Max size for log file (approx. 7 days). Afterward, it starts again.
 #define WOLFRAM_DATADROP_LOG_LINEMAX  70
 
 bool wolfram_datadrop_ready = false;
-bool wolfram_datadrop_log_header = true;
+bool wolfram_datadrop_log_new = true;
 char wolfram_datadrop_params[WOLFRAM_DATADROP_PARAM_MAX];
 char wolfram_databin_id[WOLFRAM_DATABIN_ID_MAX];
 unsigned long wolfram_datadrop_timer = 0;
 unsigned long wolfram_datadrop_timer_last = 0;
 
-#define MILLITOSEC(x)   (unsigned long)(x / 1000)
+#define MILLITOSEC(x)   (unsigned long)(x / 1000) // Convert milliseconds to seconds
 
 bool wolfram_datadrop_init()
 {
@@ -334,12 +342,13 @@ void wolfram_datadrop_update()
   char light_str[7];
 
   File log_file = FileSystem.open(wolfram_datadrop_log_file, FILE_APPEND);
-
+  
   // If the log file is too big, start it over
-  if (log_file.size() > WOLFRAM_DATADROP_LOG_MAX)
+  if ((log_file.size() > WOLFRAM_DATADROP_LOG_MAX) || (wolfram_datadrop_log_new))
   {
     log_file.close();
     FileSystem.remove(wolfram_datadrop_log_file);
+    wolfram_datadrop_log_new = false;
     return;
   }
 
@@ -353,34 +362,33 @@ void wolfram_datadrop_update()
     else if ((millis() - wolfram_datadrop_timer_last > wolfram_datadrop_sampling) || (wolfram_datadrop_timer_last == 0)) // If timer is up, upload the data
     {
       // Write header
-      if (wolfram_datadrop_log_header)
+      if (log_file.size() == 0)
       {
         log_file.println(":: Wolfram Data Drop Post Log");
         log_file.print(":: Wolfram Datbin ID: "); log_file.println(wolfram_databin_id);
         log_file.print(":: Wolfram Data Drop API Version: "); log_file.println(wolfram_datadrop_api_ver);
         log_file.print(":: Post started at: "); log_file.println(time_string);
-        wolfram_datadrop_log_header = false;
       }
 
       //
       // Convert data to string
       //
-      if (VALIDQ_TEMP)
+      if (IS_VALID_TEMP)
         dtostrf(temp_c, 4, 2, temp_c_str);
       else
         temp_c_str[0] = 0;
 
-      if (VALIDQ_HUMIDITY)
+      if (IS_VALID_HUMIDITY)
         dtostrf(humidity, 4, 2, humidity_str);
       else
         humidity_str[0] = 0;
 
-      if (VALIDQ_PRESSURE)
+      if (IS_VALID_PRESSURE)
         dtostrf(pressure, 4, 2, pressure_str);
       else
         pressure_str[0] = 0;
 
-      if (VALIDQ_LIGHT)  
+      if (IS_VALID_LIGHT)  
         dtostrf(light, 4, 2, light_str);
       else
         light_str[0] = 0;
@@ -391,38 +399,39 @@ void wolfram_datadrop_update()
         wolfram_databin_id, temp_c_str, humidity_str, pressure_str, light_str,
         wolfram_datadrop_api_url, wolfram_datadrop_api_ver, wolfram_datadrop_api_add);
 
-      if (!curl.running()) {
-        curl.flush();
-        curl.runShellCommandAsynchronously(wolfram_datadrop_params);
+      if (!processCurl.running())
+      {
+        processCurl.flush();
+        processCurl.runShellCommandAsynchronously(wolfram_datadrop_params);
         wolfram_datadrop_timer_last = millis();
         log_file.print("["); log_file.print(MILLITOSEC(wolfram_datadrop_timer_last)); log_file.println("] Posted.");
       }
     }
-    else if ((millis() - wolfram_datadrop_timer_last > wolfram_datadrop_timeout) && curl.running()) // Terminate process if timeout
+    else if ((millis() - wolfram_datadrop_timer_last > wolfram_datadrop_timeout) && processCurl.running()) // Terminate process if timeout
     {
       log_file.print("["); log_file.print(MILLITOSEC(millis())); log_file.println("] Terminated.");
-      curl.flush();
-      curl.close();      
+      processCurl.flush();
+      processCurl.close();      
     }
-    else if (curl.available())
+    else if (processCurl.available())
     {
       log_file.print("["); log_file.print(MILLITOSEC(millis())); log_file.print("] ");
       
       int i = 0;
       
-      while (curl.available() && i < WOLFRAM_DATADROP_LOG_LINEMAX)
+      while (processCurl.available() && i < WOLFRAM_DATADROP_LOG_LINEMAX)
       {
-        log_file.write(curl.read());
+        log_file.write(processCurl.read());
         i++;
       }
       
-      while (curl.available())
-        curl.read();
+      while (processCurl.available())
+        processCurl.read();
 
-      log_file.println();
+      log_file.println("...");
       
-      curl.flush();
-      curl.close();
+      processCurl.flush();
+      processCurl.close();
     }
 
     log_file.close();
@@ -439,6 +448,7 @@ void display_line(int i, int line)
 
   switch (i) {
     case 0:
+      // Shorten day names
       time_string.replace("Mon", "Mo");
       time_string.replace("Tue", "Tu");
       time_string.replace("Wed", "We");
@@ -446,46 +456,75 @@ void display_line(int i, int line)
       time_string.replace("Fri", "Fr");
       time_string.replace("Sat", "Sa");
       time_string.replace("Sun", "Su");
+      
       lcd.print("@ ");
-      lcd.print(time_string.substring(0, 14)); // For some reason, byte(0) at the end of string is spilling. Manually cutting it off
+      lcd.print(time_string.substring(0, 14)); // Removing byte(0) at the end (without it, it displays as byte(0) icon)
       lcd.write(" ");
       break;
     case 1: // Temperature (C & F)
       lcd.write(CHAR_TEMP);
-      if ((temp_c < 100) && (temp_c >= 0)) // No space for 100th digit and minus
-        lcd.write(" ");
-      lcd.print(temp_c);
-      lcd_backspace;
+      if (IS_VALID_TEMP)
+      {
+        if ((temp_c < 100) && (temp_c >= 0)) // No space for 100th digit and minus
+          lcd.write(" ");
+        lcd.print(temp_c);
+        lcd_backspace;
+        }
+      else
+        lcd.print(" --.-");
+      
       lcd.write(CHAR_DEG);
       lcd.write("C");
       lcd.write(" ");
 
-      lcd.print(temp_f);
-      lcd_backspace;
+      if (IS_VALID_TEMP)
+      {
+        lcd.print(temp_f);
+        lcd_backspace;
+      }
+      else
+        lcd.print(" --.-");
+        
       lcd.write(CHAR_DEG);
       lcd.write("F");
-      break;
+       break;
 
     case 2: // Humidity and ambient light
       lcd.write(CHAR_HUMID);
-      if (humidity < 100) // No space for 100th digit
-        lcd.write(" ");
-      lcd.print(humidity);
-      lcd_backspace;
+      if (IS_VALID_HUMIDITY)
+      {
+        if (humidity < 100) // No space for 100th digit
+          lcd.write(" ");
+        lcd.print(humidity);
+        lcd_backspace;
+      }
+      else
+        lcd.print(" --.-");
+        
       lcd.print("%  ");
 
       lcd.write(CHAR_LIGHT);
-      if (humidity < 100) // No space for 100th digit
-        lcd.write(" ");
-      lcd.print(light);
-      lcd_backspace;
+      if (IS_VALID_LIGHT)
+      {
+        if (light < 100) // No space for 100th digit
+          lcd.write(" ");
+        lcd.print(light);
+        lcd_backspace;        
+      }
+      else
+        lcd.print(" --.-");
+      
       lcd.write("%");
       break;
 
     case 3: // Pressure
       lcd.write(CHAR_PRESS);
       lcd.write(" ");
-      lcd.print(pressure);
+      if (IS_VALID_PRESSURE)
+        lcd.print(pressure);
+      else
+        lcd.print("-----.--");
+        
       lcd.print(" Pa");
       break;
 
@@ -522,12 +561,12 @@ void setup()
   // Weather sensors set up
   //
 #ifdef WEATHER_SHIELD
-  pinMode(STAT1, OUTPUT); //Status LED Blue
-  pinMode(STAT2, OUTPUT); //Status LED Green
-  pinMode(OP_VOL, INPUT);
+  pinMode(WS_STAT1, OUTPUT); //Status LED Blue
+  pinMode(WS_STAT2, OUTPUT); //Status LED Green
+  pinMode(WS_OP_VOL, INPUT);
 #endif
 
-  pinMode(LIGHT, INPUT); // Light sensor I/O
+  pinMode(SENSOR_LIGHT, INPUT); // Light sensor I/O
 
   Wire.begin();
 
@@ -540,9 +579,7 @@ void setup()
   //Configure the humidity sensor
   sensorHumidity.begin();
 
-  //
-  // Initialization screen
-  //
+  // Display initialization message
   lcd.setCursor(0, 0);
   lcd.print("Ambient Databox");
   lcd.setCursor(0, 1);
@@ -553,25 +590,23 @@ void setup()
   Bridge.begin();
   FileSystem.begin();
 
+  // Initialize Wolfrma Data Drop 
   wolfram_datadrop_init();
 
   lcd.noBlink();
-
-  Serial.begin(9600);
-  Serial.println("Ambient Databox ready.");
 }
 
 void loop()
 {
-  if (!date.running()) {
-    date.begin("date");
-    date.addParameter("+%R %a %m/%d");
-    date.runAsynchronously();
+  if (!processDate.running()) {
+    processDate.begin("date");
+    processDate.addParameter("+%R %a %m/%d"); // "23:00 Mon 06/12" format
+    processDate.runAsynchronously();
   }
 
-  while (date.available())
+  while (processDate.available())
   {
-    time_string = date.readString();
+    time_string = processDate.readString();
     get_weather();
 
     lcd.clear();
