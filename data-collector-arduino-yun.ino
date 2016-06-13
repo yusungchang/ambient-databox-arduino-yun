@@ -12,6 +12,7 @@
       - MP3115A2 pressure sensor breakout, HTU21D humidity sensor breaout, and TEMT6000 light sensor breakout
       - ADXL335 accelerometer breakout
       - [Future] SparkFun LSM9DS1 IMU breakout (9 degree)
+      - [Future] UV Sensor breakout (e.g. http://www.waveshare.com/uv-sensor.htm)
 
     3. Data Repository
       - Wolfram Data Drop (http://datadrop.wolframcloud.com/)
@@ -24,11 +25,15 @@
 #include "MPL3115A2.h" //Pressure sensor
 #include "HTU21D.h" //Humidity sensor
 
-
+//
+// Configure your hardware by comment/uncomment appropriate sensors
+// Note: Be careful with analog pin usage. Make sure that each pin only connects to one sensor/shields.
+// 
 #define _OSEPP_LCD_01_ // If you are using OSEPP LCD 01 panel (w/ keypads)
 #define _WEATHER_SHIELD_ // If you are using SparkFun Weather Shield
 //#define _ADXL335_
 //#define _LSM9DS1
+//#define _UV_SENSOR_
 
 #ifdef _LSM9DS1_
 //#include <SPI.h>
@@ -155,25 +160,25 @@ MPL3115A2 sensorPressure;
 HTU21D sensorHumidity;
 
 #ifdef _WEATHER_SHIELD_
-#define WS_STAT1 7 // Status LED pins for Weather Shield
-#define WS_STAT2 8 // Status LED pins for Weather Shield
-#define WS_OP_VOL A3 // Reference operational voltage of Weather Shield 
-#define SENSOR_LIGHT A1 // analog I/O pins for light sensor (for Weather Shield)
+#define WS_STAT1      7 // Status LED pins for Weather Shield
+#define WS_STAT2      8 // Status LED pins for Weather Shield
+#define WS_OP_VOL     A3 // Reference operational voltage of Weather Shield 
+#define SENSOR_LIGHT  A1 // analog I/O pins for light sensor (for Weather Shield)
 #else
-#define SENSOR_LIGHT A4 // analog I/O pins for light sensor
+#define SENSOR_LIGHT  A4 // analog I/O pins for light sensor (for TEMT6000 or other discrete breakouts)
 #endif
 
 #ifdef _ADXL335_
 // Assign them based on actual placement of the breakout.
 // X-Y for horizontal plane, Z for vertical (height)
-#define SENSOR_ACCEL_X A3
-#define SENSOR_ACCEL_Y A2
-#define SENSOR_ACCEL_Z A1
+#define SENSOR_ACCEL_X  A1
+#define SENSOR_ACCEL_Y  A2
+#define SENSOR_ACCEL_Z  A3
 #endif
 
 #ifdef _LSM9DS1_
 LSM9DS1 sensorIMU;
-#define LSM9DS1_M  0x1E // Would be 0x1C if SDO_M is LOW
+#define LSM9DS1_M   0x1E // Would be 0x1C if SDO_M is LOW
 #define LSM9DS1_AG  0x6B // Would be 0x6A if SDO_AG is LOW
 #endif
 
@@ -181,22 +186,22 @@ LSM9DS1 sensorIMU;
 //
 // Wolfram Data Drop related declarations
 //
-#define wolfram_databin_id_file "/mnt/sda1/wolframdatabin.id" // A file containing Databin ID in plain text. Store it in Atheros (Linino) side.
+#define wolfram_databin_id_file   "/mnt/sda1/wolframdatabin.id" // A file containing Databin ID in plain text. Store it in Atheros (Linino) side.
 #define wolfram_datadrop_log_file "/mnt/sda1/wolframdatadrop.log"
 #define wolfram_datadrop_api_url  "http://datadrop.wolframcloud.com/api" // Data Drop API URL
-#define wolfram_datadrop_api_ver "v1.0" // Data Drop API version
-#define wolfram_datadrop_api_add "Add" // Data Drop Add command
+#define wolfram_datadrop_api_ver  "v1.0" // Data Drop API version
+#define wolfram_datadrop_api_add  "Add" // Data Drop Add command
 #define wolfram_datadrop_sampling 300000 // Sample rate (default: every 300 seconds (5 min) at most)
-#define wolfram_datadrop_timeout 60000 // Upload timeout (default: 60 seconds)
+#define wolfram_datadrop_timeout  60000 // Upload timeout (default: 60 seconds)
 
 //
 // UI related declarations
 //
 #define SCROLL_DELAY    1000 // How long each screen will stay in milliseconds
-#ifdef _LSM9DS1_
-#define SCREEN_LINE_MAX 5
-#else
+#if defined (_ADXL335_) || defined(_LSM9DS1_)
 #define SCREEN_LINE_MAX 6
+#else
+#define SCREEN_LINE_MAX 5
 #endif
 
 int screen = 0;
@@ -593,10 +598,11 @@ void display_line(int i, int line)
 #if defined(_AXDL335_) || defined(_LSM9DS1_)
     case 4: // Acceleration events
       lcd.print("~ ");
+      lcd.print("No event");
       break;
 #endif
-
-    default: // Data Drop info
+    
+    case (SCREEN_LINE_MAX - 1): // Data Drop info
       lcd.write(CHAR_WOLFRAM);
       lcd.write(" ");
       if (wolfram_datadrop_ready)
